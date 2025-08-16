@@ -108,6 +108,7 @@ class KachakaDashboardApp(tk.Tk):
         # --- 影片錄製設定 ---
         self.front_video_writer = None
         self.back_video_writer = None
+        self.combined_video_writer = None
 
     def on_closing(self):
         self.running = False
@@ -258,6 +259,24 @@ class KachakaDashboardApp(tk.Tk):
                     frame_bgr = cv2.cvtColor(np.array(front_img_to_display), cv2.COLOR_RGB2BGR)
                     self.front_video_writer.write(frame_bgr)
 
+                # --- 合併錄影 ---
+                if front_img_to_display and back_img_to_display:
+                    front_array = np.array(front_img_to_display)
+                    back_array = np.array(back_img_to_display)
+
+                    if front_array.shape[1] == back_array.shape[1]:
+                        if self.combined_video_writer is None:
+                            height = front_array.shape[0] + back_array.shape[0]
+                            width = front_array.shape[1]
+                            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                            self.combined_video_writer = cv2.VideoWriter('combined.mp4', fourcc, 10.0, (width, height))
+                            print(f"開始錄製合併畫面到 'combined.mp4' (尺寸: {width}x{height})")
+
+                        if self.combined_video_writer:
+                            combined_frame = np.vstack((front_array, back_array))
+                            frame_bgr = cv2.cvtColor(combined_frame, cv2.COLOR_RGB2BGR)
+                            self.combined_video_writer.write(frame_bgr)
+
                 # --- 更新物件資訊 ---
                 info_text = "\n".join([f"- {OBJECT_LABEL[obj.label]} ({obj.score:.2f})" for obj in objects])
                 self.info_label.config(text=info_text)
@@ -283,6 +302,9 @@ class KachakaDashboardApp(tk.Tk):
         if self.back_video_writer:
             self.back_video_writer.release()
             print("後鏡頭錄影已儲存並關閉。")
+        if self.combined_video_writer:
+            self.combined_video_writer.release()
+            print("合併錄影已儲存並關閉。")
 
 async def run_robot_commands_async(client: kachaka_api.aio.KachakaApiClient, command_queue: asyncio.Queue, robot_is_idle_event: asyncio.Event):
     """
