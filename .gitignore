@@ -1,0 +1,19 @@
+# Python Virtual Environment
+# 忽略虛擬環境資料夾，這是 Git 錯誤的主要來源
+.venv/
+venv/
+ENV/
+
+# Python cache files
+# 忽略 Python 編譯過程中產生的快取檔案
+__pycache__/
+*.pyc
+
+# IDE and editor directories
+# 忽略 VS Code 和其他編輯器的設定檔
+.vscode/
+extensions/
+
+# Output files from the application
+# 忽略程式執行時產生的影片錄製檔
+*.mp4
