@@ -95,6 +95,9 @@ class KachakaDashboardApp(tk.Tk):
         self.go_button = ttk.Button(control_frame, text="GO", command=self.on_go_button_clicked)
         self.go_button.pack(side=tk.LEFT, padx=5)
 
+        self.return_home_button = ttk.Button(control_frame, text="回充電站", command=self.on_return_home_button_clicked)
+        self.return_home_button.pack(side=tk.LEFT, padx=5)
+
         # --- 預先建立的 Artist ---
         self.front_img_display = ttk.Label(front_cam_frame)
         self.front_img_display.pack()
@@ -122,6 +125,14 @@ class KachakaDashboardApp(tk.Tk):
         
         print(f"按鈕已點擊！傳送移動到 '{selected_location}' 的指令。")
         self.command_queue.put_nowait(selected_location)
+
+    def on_return_home_button_clicked(self):
+        if not self.robot_is_idle_event.is_set():
+            print("指令無法傳送：機器人正在移動中。")
+            return
+        
+        print("按鈕已點擊！傳送返回充電站的指令。")
+        self.command_queue.put_nowait("return_home")
 
     def resize_pil_image(self, pil_image, widget):
         """將 PIL 影像縮放以符合 Tkinter 元件的大小，同時保持長寬比。"""
@@ -194,15 +205,39 @@ class KachakaDashboardApp(tk.Tk):
                 dy = -arrow_len * math.sin(robot_pose.theta)
                 self.robot_arrow_artist = self.ax_map.arrow(px, py, dx, dy, head_width=10, head_length=10, fc='red', ec='red')
 
-                # --- 更新後鏡頭 ---
-                back_ros_image = await self.client.get_back_camera_ros_compressed_image()
-                if back_ros_image.data:
-                    back_img_pil = Image.open(io.BytesIO(back_ros_image.data))
+                # --- 同時獲取攝影機影像和物件偵測結果 ---
+                front_cam_image_ros, back_cam_image_ros, detection_result = await asyncio.gather(
+                    anext(front_cam_stream),
+                    self.client.get_back_camera_ros_compressed_image(),
+                    anext(object_detection_stream)
+                )
+                (header, objects) = detection_result
 
-                    # 調整影像大小以符合視窗
-                    back_img_pil = self.resize_pil_image(back_img_pil, self.back_img_display)
+                # --- 準備原始 PIL 影像 ---
+                front_img_pil = Image.open(io.BytesIO(front_cam_image_ros.data))
+                back_img_pil = Image.open(io.BytesIO(back_cam_image_ros.data)) if back_cam_image_ros.data else None
 
-                    back_img_array = np.array(back_img_pil)
+                # --- 根據 frame_id 決定在哪個影像上繪製 bounding box ---
+                if header.frame_id == "camera_front":
+                    front_img_pil_with_bbox = get_bbox_drawn_image(front_cam_image_ros, objects)
+                    front_img_to_display = front_img_pil_with_bbox
+                    back_img_to_display = back_img_pil
+                elif back_img_pil and header.frame_id == "camera_back":
+                    back_img_pil_with_bbox = get_bbox_drawn_image(back_cam_image_ros, objects)
+                    front_img_to_display = front_img_pil
+                    back_img_to_display = back_img_pil_with_bbox
+                else:
+                    front_img_to_display = front_img_pil
+                    back_img_to_display = back_img_pil
+
+                # --- 更新後鏡頭畫面 ---
+                if back_img_to_display:
+                    back_img_resized = self.resize_pil_image(back_img_to_display.copy(), self.back_img_display)
+                    back_img_tk = self.pil_to_tk(back_img_resized)
+                    self.back_img_display.configure(image=back_img_tk)
+                    self.back_img_display.image = back_img_tk
+
+                    back_img_array = np.array(back_img_to_display)
                     if self.back_video_writer is None:
                         height, width, _ = back_img_array.shape
                         fourcc = cv2.VideoWriter_fourcc(*'mp4v')
@@ -212,27 +247,15 @@ class KachakaDashboardApp(tk.Tk):
                     if self.back_video_writer:
                         frame_bgr = cv2.cvtColor(back_img_array, cv2.COLOR_RGB2BGR)
                         self.back_video_writer.write(frame_bgr)
-                    
-                    back_img_tk = self.pil_to_tk(back_img_pil)
-                    self.back_img_display.configure(image=back_img_tk)
-                    self.back_img_display.image = back_img_tk
 
-                # --- 更新前鏡頭與物件偵測 ---
-                front_cam_image, (header, objects) = await asyncio.gather(
-                    anext(front_cam_stream), anext(object_detection_stream)
-                )
-                # In this version of the library, get_bbox_drawn_image returns a PIL Image object.
-                img_with_bbox_pil = get_bbox_drawn_image(front_cam_image, objects)
-
-                # 調整影像大小以符合視窗
-                img_with_bbox_pil = self.resize_pil_image(img_with_bbox_pil, self.front_img_display)
-
-                front_img_tk = self.pil_to_tk(img_with_bbox_pil)
+                # --- 更新前鏡頭畫面 ---
+                front_img_resized = self.resize_pil_image(front_img_to_display.copy(), self.front_img_display)
+                front_img_tk = self.pil_to_tk(front_img_resized)
                 self.front_img_display.configure(image=front_img_tk)
                 self.front_img_display.image = front_img_tk
 
                 if self.front_video_writer:
-                    frame_bgr = cv2.cvtColor(np.array(img_with_bbox_pil), cv2.COLOR_RGB2BGR)
+                    frame_bgr = cv2.cvtColor(np.array(front_img_to_display), cv2.COLOR_RGB2BGR)
                     self.front_video_writer.write(frame_bgr)
 
                 # --- 更新物件資訊 ---
@@ -267,18 +290,28 @@ async def run_robot_commands_async(client: kachaka_api.aio.KachakaApiClient, com
     """
     try:
         while True:
-            target_location = await command_queue.get()
+            command = await command_queue.get()
             robot_is_idle_event.clear()
-            print(f"收到指令，正在移動到 '{target_location}'...")
+            
             try:
-                await client.update_resolver()
-                result = await client.move_to_location(target_location)
-                if result.success:
-                    print(f"已成功抵達 '{target_location}'。")
-                else:
-                    print(f"移動到 '{target_location}' 失敗: {result.error_code}, {result.message}")
+                if command == "return_home":
+                    print("收到返回充電站的指令...")
+                    result = await client.return_home()
+                    if result.success:
+                        print("已成功返回充電站。")
+                    else:
+                        print(f"返回充電站失敗: {result.error_code}, {result.message}")
+                else: # This is a move_to_location command
+                    target_location = command
+                    print(f"收到指令，正在移動到 '{target_location}'...")
+                    await client.update_resolver()
+                    result = await client.move_to_location(target_location)
+                    if result.success:
+                        print(f"已成功抵達 '{target_location}'。")
+                    else:
+                        print(f"移動到 '{target_location}' 失敗: {result.error_code}, {result.message}")
             except Exception as e:
-                print(f"執行移動指令時發生例外: {e}")
+                print(f"執行指令 '{command}' 時發生例外: {e}")
                 traceback.print_exc()
 
             robot_is_idle_event.set()
